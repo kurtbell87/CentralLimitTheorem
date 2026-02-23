@@ -1,55 +1,3 @@
-# claude-mathematics-kit
-
-An orchestration framework for autonomous formal mathematics. An LLM agent operates under phased constraints — file locks, tool-use hooks, error summarization — to produce Lean 4 / Mathlib proofs from natural-language specifications without human intervention beyond the initial `./math.sh full <spec>` invocation.
-
-~3,000 lines of orchestration infrastructure (`math.sh`, `scripts/`, `.claude/prompts/`, `.claude/hooks/`). The agent under orchestration is Claude (Anthropic).
-
-## Architecture
-
-The pipeline decomposes formalization into 8 phases, each executed by a fresh sub-agent with phase-specific tool permissions:
-
-```
-SURVEY → SPECIFY → CONSTRUCT → FORMALIZE → PROVE → POLISH → AUDIT → LOG
-```
-
-Each phase gets its own prompt (`.claude/prompts/math-<phase>.md`), its own file-permission state, and its own hook enforcement rules. The orchestrator (`math.sh`) sequences phases, manages revision loops, and handles inter-phase context transfer via disk — the sub-agents never share an LLM context window.
-
-### Design decisions
-
-**Phase-locked file permissions.** During PROVE, spec files are `chmod 444`. During AUDIT, all `.lean` files are locked. Without this, the agent "fixes" build errors by relaxing theorem statements instead of fixing proofs. The permission system makes the wrong thing impossible rather than merely discouraged.
-
-**Pre-tool-use hooks.** A Claude Code hook (`.claude/hooks/pre-tool-use.sh`) intercepts every Edit, Write, and Bash call. It blocks `axiom`, `unsafe`, `native_decide`, and `admit` in all phases. During PROVE, it parses the Edit target to detect signature modifications and blocks them. During FORMALIZE, it blocks proof tactics — only `sorry` is allowed. Without this, the agent introduces `admit` to close difficult goals, or writes proofs during formalization that later constrain the proof strategy.
-
-**Error summarization.** `lake-summarized.sh` wraps `lake build`. On success, it emits one line (`BUILD OK | clean | 34s`). On failure, it pipes through `lean-error-summarize.sh`, which strips Mathlib type expansions, classifies errors (`TYPE_MISMATCH`, `TACTIC_FAIL`, `UNKNOWN_IDENT`, `TIMEOUT`, `UNIVERSE_INCOMPAT`), extracts goal states, and caps output at 40 lines. Without this, a single type mismatch error can expand to 200+ lines of Mathlib internals and consume the agent's entire context window.
-
-**Sorry batching.** `enumerate-sorrys.sh` locates every `sorry` with its enclosing theorem name and line number. `batch-sorrys.py` groups them into batches of 5, respecting file boundaries. The prove phase can run in chunked mode, spawning one sub-agent per batch. Without batching, a file with 20 sorrys overwhelms the agent; it loses track of which sorry it's working on and produces overlapping edits.
-
-**Negative knowledge accumulation.** `DOMAIN_CONTEXT.md` has a `## DOES NOT APPLY` section where the prove agent records failed approaches: lemma names that don't exist in the current Mathlib version, tactic strategies that produce type mismatches, API renames. The next revision cycle reads this before starting. Without it, agents retry `measureReal_univ` (doesn't exist; correct name is `probReal_univ`) on every attempt.
-
-**Dependency-ordered construction queue.** `CONSTRUCTIONS.md` defines a DAG of proof targets. `resolve-deps.py` topologically sorts them and selects the next unblocked construction. Program mode (`./math.sh program`) auto-advances through the queue, running `full` on each construction in dependency order, marking downstream constructions as blocked on failure.
-
-**Revision loop with bounded retries.** If AUDIT finds sorrys or axioms, it writes `REVISION.md` specifying which phase to restart from. The `full` pipeline re-enters at that phase, up to 3 revisions. The revision file is archived after each attempt. Without bounded retries, the agent loops indefinitely on an impossible goal.
-
-### Enforcement
-
-The hook system (`pre-tool-use.sh`) performs the following concrete checks:
-
-| Phase | Blocked action | Mechanism |
-|-------|---------------|-----------|
-| All | `axiom`, `unsafe`, `native_decide`, `admit` in file writes | Regex on tool input |
-| All | `chmod`, `sudo`, destructive git (`revert`, `checkout`, `restore`) | Regex on Bash input |
-| All | `lake clean` (preserves olean cache) | Regex on Bash input |
-| SURVEY | Any file write or shell redirect | Tool type check |
-| SPECIFY | Write to `.lean` files | Filename regex |
-| CONSTRUCT | Write to `.lean` files | Filename regex |
-| FORMALIZE | Proof tactics in `.lean` writes (only `sorry` allowed) | Tactic keyword regex |
-| FORMALIZE | Raw `lake build` (must use summarized wrapper) | Command regex |
-| PROVE | `Write` to `.lean` (must use `Edit`) | Tool type check |
-| PROVE | Edit that modifies theorem/lemma/def signatures | JSON parse of `old_string` |
-| PROVE | Write to spec files | Filename regex |
-| POLISH | Edit that modifies proof bodies | Tactic keyword regex in `old_string` |
-| AUDIT | Any write to `.lean` or spec files | Filename regex |
-
 ## Proof of concept: Central Limit Theorem
 
 The first end-to-end output of the pipeline is a complete formalization of the **Lindeberg-Levy Central Limit Theorem** in Lean 4.27.0 / Mathlib v4.27.0.
@@ -117,6 +65,58 @@ Requires Lean 4.27.0 (see `lean-toolchain`). Mathlib v4.27.0 is pinned in `lakef
 | `charFun_iid_sum_eq_pow` | `CentralLimitTheorem.lean` |
 | `central_limit_theorem_charFun` | `CentralLimitTheorem.lean` |
 | `central_limit_theorem` | `CentralLimitTheorem.lean` |
+
+# claude-mathematics-kit
+
+An orchestration framework for autonomous formal mathematics. An LLM agent operates under phased constraints — file locks, tool-use hooks, error summarization — to produce Lean 4 / Mathlib proofs from natural-language specifications without human intervention beyond the initial `./math.sh full <spec>` invocation.
+
+~3,000 lines of orchestration infrastructure (`math.sh`, `scripts/`, `.claude/prompts/`, `.claude/hooks/`). The agent under orchestration is Claude (Anthropic).
+
+## Architecture
+
+The pipeline decomposes formalization into 8 phases, each executed by a fresh sub-agent with phase-specific tool permissions:
+
+```
+SURVEY → SPECIFY → CONSTRUCT → FORMALIZE → PROVE → POLISH → AUDIT → LOG
+```
+
+Each phase gets its own prompt (`.claude/prompts/math-<phase>.md`), its own file-permission state, and its own hook enforcement rules. The orchestrator (`math.sh`) sequences phases, manages revision loops, and handles inter-phase context transfer via disk — the sub-agents never share an LLM context window.
+
+### Design decisions
+
+**Phase-locked file permissions.** During PROVE, spec files are `chmod 444`. During AUDIT, all `.lean` files are locked. Without this, the agent "fixes" build errors by relaxing theorem statements instead of fixing proofs. The permission system makes the wrong thing impossible rather than merely discouraged.
+
+**Pre-tool-use hooks.** A Claude Code hook (`.claude/hooks/pre-tool-use.sh`) intercepts every Edit, Write, and Bash call. It blocks `axiom`, `unsafe`, `native_decide`, and `admit` in all phases. During PROVE, it parses the Edit target to detect signature modifications and blocks them. During FORMALIZE, it blocks proof tactics — only `sorry` is allowed. Without this, the agent introduces `admit` to close difficult goals, or writes proofs during formalization that later constrain the proof strategy.
+
+**Error summarization.** `lake-summarized.sh` wraps `lake build`. On success, it emits one line (`BUILD OK | clean | 34s`). On failure, it pipes through `lean-error-summarize.sh`, which strips Mathlib type expansions, classifies errors (`TYPE_MISMATCH`, `TACTIC_FAIL`, `UNKNOWN_IDENT`, `TIMEOUT`, `UNIVERSE_INCOMPAT`), extracts goal states, and caps output at 40 lines. Without this, a single type mismatch error can expand to 200+ lines of Mathlib internals and consume the agent's entire context window.
+
+**Sorry batching.** `enumerate-sorrys.sh` locates every `sorry` with its enclosing theorem name and line number. `batch-sorrys.py` groups them into batches of 5, respecting file boundaries. The prove phase can run in chunked mode, spawning one sub-agent per batch. Without batching, a file with 20 sorrys overwhelms the agent; it loses track of which sorry it's working on and produces overlapping edits.
+
+**Negative knowledge accumulation.** `DOMAIN_CONTEXT.md` has a `## DOES NOT APPLY` section where the prove agent records failed approaches: lemma names that don't exist in the current Mathlib version, tactic strategies that produce type mismatches, API renames. The next revision cycle reads this before starting. Without it, agents retry `measureReal_univ` (doesn't exist; correct name is `probReal_univ`) on every attempt.
+
+**Dependency-ordered construction queue.** `CONSTRUCTIONS.md` defines a DAG of proof targets. `resolve-deps.py` topologically sorts them and selects the next unblocked construction. Program mode (`./math.sh program`) auto-advances through the queue, running `full` on each construction in dependency order, marking downstream constructions as blocked on failure.
+
+**Revision loop with bounded retries.** If AUDIT finds sorrys or axioms, it writes `REVISION.md` specifying which phase to restart from. The `full` pipeline re-enters at that phase, up to 3 revisions. The revision file is archived after each attempt. Without bounded retries, the agent loops indefinitely on an impossible goal.
+
+### Enforcement
+
+The hook system (`pre-tool-use.sh`) performs the following concrete checks:
+
+| Phase | Blocked action | Mechanism |
+|-------|---------------|-----------|
+| All | `axiom`, `unsafe`, `native_decide`, `admit` in file writes | Regex on tool input |
+| All | `chmod`, `sudo`, destructive git (`revert`, `checkout`, `restore`) | Regex on Bash input |
+| All | `lake clean` (preserves olean cache) | Regex on Bash input |
+| SURVEY | Any file write or shell redirect | Tool type check |
+| SPECIFY | Write to `.lean` files | Filename regex |
+| CONSTRUCT | Write to `.lean` files | Filename regex |
+| FORMALIZE | Proof tactics in `.lean` writes (only `sorry` allowed) | Tactic keyword regex |
+| FORMALIZE | Raw `lake build` (must use summarized wrapper) | Command regex |
+| PROVE | `Write` to `.lean` (must use `Edit`) | Tool type check |
+| PROVE | Edit that modifies theorem/lemma/def signatures | JSON parse of `old_string` |
+| PROVE | Write to spec files | Filename regex |
+| POLISH | Edit that modifies proof bodies | Tactic keyword regex in `old_string` |
+| AUDIT | Any write to `.lean` or spec files | Filename regex |
 
 ## License
 
